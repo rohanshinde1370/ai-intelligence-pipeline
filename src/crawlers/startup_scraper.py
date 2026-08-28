@@ -1,7 +1,9 @@
 import asyncio
 import csv
 import json
+import re
 from datetime import datetime, timezone
+
 from playwright.async_api import async_playwright
 
 
@@ -11,9 +13,19 @@ OUTPUT_CSV = "startups.csv"
 OUTPUT_JSON = "startups.json"
 
 
-async def main():
+def clean_text(text):
+    """Clean extra whitespace from extracted text."""
+    if not text:
+        return ""
+
+    return re.sub(r"\s+", " ", text).strip()
+
+
+async def scrape_yc():
 
     print("Starting YC startup scraper...")
+
+    startups = {}
 
     async with async_playwright() as p:
 
@@ -21,61 +33,132 @@ async def main():
             headless=True
         )
 
-        page = await browser.new_page()
+        page = await browser.new_page(
+            viewport={
+                "width": 1440,
+                "height": 900
+            },
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0 Safari/537.36"
+            )
+        )
 
         print("Opening YC companies page...")
 
-        try:
+        response = await page.goto(
+            SOURCE_URL,
+            wait_until="domcontentloaded",
+            timeout=60000
+        )
 
-            response = await page.goto(
-                SOURCE_URL,
-                wait_until="domcontentloaded",
-                timeout=60000
-            )
-
-            print(
-                "Page status:",
-                response.status if response else None
-            )
-
-        except Exception as e:
-
-            print(
-                "Page loading error:",
-                repr(e)
-            )
-
-            await browser.close()
-            return
-
-        # Give JavaScript time to render
-        await page.wait_for_timeout(5000)
+        print(
+            "Page status:",
+            response.status if response else "Unknown"
+        )
 
         print(
             "Page title:",
             await page.title()
         )
 
-        startups = {}
+        # Give JavaScript time to load
+        await page.wait_for_timeout(5000)
 
-        # Scroll several times so dynamically loaded
-        # companies have a chance to appear.
-        for i in range(20):
+        previous_count = 0
+        stable_rounds = 0
+
+        # Try to load as many companies as possible
+        for page_no in range(1, 101):
 
             print(
-                f"Scrolling page {i + 1}/20..."
+                f"Loading directory batch {page_no}/100..."
             )
 
-            await page.mouse.wheel(
-                0,
-                5000
+            # Scroll to bottom
+            await page.evaluate(
+                "window.scrollTo(0, document.body.scrollHeight)"
             )
 
-            await page.wait_for_timeout(
-                1000
+            await page.wait_for_timeout(1500)
+
+            # Try common Load More buttons
+            buttons = page.get_by_role(
+                "button"
             )
 
-        # Extract company links from rendered DOM
+            button_count = await buttons.count()
+
+            clicked = False
+
+            for i in range(button_count):
+
+                try:
+
+                    button = buttons.nth(i)
+
+                    text = clean_text(
+                        await button.inner_text()
+                    ).lower()
+
+                    if (
+                        "load more" in text
+                        or "show more" in text
+                        or "more" == text
+                    ):
+
+                        if await button.is_visible():
+
+                            await button.click()
+
+                            print(
+                                "Clicked:",
+                                text
+                            )
+
+                            await page.wait_for_timeout(
+                                2000
+                            )
+
+                            clicked = True
+
+                            break
+
+                except Exception:
+                    continue
+
+            # Count company links currently loaded
+            current_count = await page.locator(
+                'a[href^="/companies/"]'
+            ).count()
+
+            print(
+                "Company links currently:",
+                current_count
+            )
+
+            if current_count == previous_count:
+
+                stable_rounds += 1
+
+            else:
+
+                stable_rounds = 0
+
+            previous_count = current_count
+
+            # If nothing new is loading for several rounds
+            if stable_rounds >= 5 and not clicked:
+
+                print(
+                    "No additional companies detected."
+                )
+
+                break
+
+        print("\nExtracting company records...")
+
         links = await page.locator(
             'a[href^="/companies/"]'
         ).all()
@@ -85,6 +168,10 @@ async def main():
             len(links)
         )
 
+        collected_at = datetime.now(
+            timezone.utc
+        ).isoformat()
+
         for link in links:
 
             try:
@@ -93,18 +180,19 @@ async def main():
                     "href"
                 )
 
-                name = (
-                    await link.inner_text()
-                ).strip()
-
-                if not href or not name:
+                if not href:
                     continue
 
                 # Remove query parameters
                 href = href.split("?")[0]
 
-                # Avoid invalid company URL
-                if href == "/companies/":
+                # Avoid invalid paths
+                if href.rstrip("/") == "/companies":
+                    continue
+
+                if not href.startswith(
+                    "/companies/"
+                ):
                     continue
 
                 company_url = (
@@ -112,7 +200,40 @@ async def main():
                     + href
                 )
 
-                # Deduplicate by URL
+                company_url = company_url.rstrip("/")
+
+                # Extract text
+                name = clean_text(
+                    await link.inner_text()
+                )
+
+                if not name:
+                    continue
+
+                # YC cards contain extra information.
+                # First line is normally the company name.
+                lines = [
+                    clean_text(x)
+                    for x in name.split("\n")
+                    if clean_text(x)
+                ]
+
+                entity_name = (
+                    lines[0]
+                    if lines
+                    else name
+                )
+
+                # Avoid obvious navigation links
+                if entity_name.lower() in {
+                    "companies",
+                    "jobs",
+                    "people",
+                    "cofounder matching",
+                    "startup jobs",
+                }:
+                    continue
+
                 startups[company_url] = {
 
                     "schemaVersion": "1.0",
@@ -123,119 +244,129 @@ async def main():
 
                     "source_url": company_url,
 
-                    "entityName": " ".join(
-                        name.split()
-                    ),
+                    "entityName": entity_name,
 
                     "employeeCount": None,
 
-                    "collectedAt":
-                        datetime.now(
-                            timezone.utc
-                        ).isoformat()
+                    "collectedAt": collected_at
+
                 }
 
             except Exception:
                 continue
 
-        records = list(
-            startups.values()
-        )
-
-        print(
-            "\nUnique startups found:",
-            len(records)
-        )
-
-        if not records:
-
-            print(
-                "No startups found."
-            )
-
-            await browser.close()
-            return
-
-        # -------------------------
-        # Save CSV
-        # -------------------------
-
-        fields = [
-            "schemaVersion",
-            "recordType",
-            "source_name",
-            "source_url",
-            "entityName",
-            "employeeCount",
-            "collectedAt"
-        ]
-
-        with open(
-            OUTPUT_CSV,
-            "w",
-            newline="",
-            encoding="utf-8"
-        ) as file:
-
-            writer = csv.DictWriter(
-                file,
-                fieldnames=fields
-            )
-
-            writer.writeheader()
-            writer.writerows(records)
-
-        print(
-            f"CSV created: {OUTPUT_CSV}"
-        )
-
-        # -------------------------
-        # Save JSON
-        # -------------------------
-
-        with open(
-            OUTPUT_JSON,
-            "w",
-            encoding="utf-8"
-        ) as file:
-
-            json.dump(
-                records,
-                file,
-                indent=2,
-                ensure_ascii=False
-            )
-
-        print(
-            f"JSON created: {OUTPUT_JSON}"
-        )
-
-        # -------------------------
-        # Sample
-        # -------------------------
-
-        print(
-            "\n--- SAMPLE STARTUPS ---\n"
-        )
-
-        for i, startup in enumerate(
-            records[:10],
-            start=1
-        ):
-
-            print(
-                f"{i}. "
-                f"{startup['entityName']}"
-            )
-
-            print(
-                "URL:",
-                startup["source_url"]
-            )
-
-            print("-" * 60)
-
         await browser.close()
+
+    return list(
+        startups.values()
+    )
+
+
+def save_csv(startups):
+
+    fields = [
+        "schemaVersion",
+        "recordType",
+        "source_name",
+        "source_url",
+        "entityName",
+        "employeeCount",
+        "collectedAt"
+    ]
+
+    with open(
+        OUTPUT_CSV,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fields
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            startups
+        )
+
+    print(
+        f"CSV created: {OUTPUT_CSV}"
+    )
+
+
+def save_json(startups):
+
+    with open(
+        OUTPUT_JSON,
+        "w",
+        encoding="utf-8"
+    ) as file:
+
+        json.dump(
+            startups,
+            file,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    print(
+        f"JSON created: {OUTPUT_JSON}"
+    )
+
+
+async def main():
+
+    startups = await scrape_yc()
+
+    print(
+        "\n======================================"
+    )
+
+    print(
+        "Unique startups found:",
+        len(startups)
+    )
+
+    print(
+        "======================================"
+    )
+
+    if not startups:
+
+        print(
+            "No startup records found."
+        )
+
+        return
+
+    print(
+        "\n--- SAMPLE STARTUPS ---\n"
+    )
+
+    for i, startup in enumerate(
+        startups[:20],
+        start=1
+    ):
+
+        print(
+            f"{i}. {startup['entityName']}"
+        )
+
+        print(
+            "URL:",
+            startup["source_url"]
+        )
+
+        print(
+            "-" * 60
+        )
+
+    save_csv(startups)
+
+    save_json(startups)
 
     print(
         "\n======================================"
@@ -246,7 +377,8 @@ async def main():
     )
 
     print(
-        f"Total startups: {len(records)}"
+        "Total startups:",
+        len(startups)
     )
 
     print(
