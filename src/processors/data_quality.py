@@ -14,6 +14,10 @@ FILES = {
     "RESEARCH": BASE_DIR / "research_papers.csv",
     "NEWS": BASE_DIR / "news.csv",
     "JOBS": BASE_DIR / "jobs.csv",
+
+    # Models file is inside data folder
+    "MODELS": BASE_DIR / "data" / "models_enriched.csv",
+
     "RELATIONSHIPS": BASE_DIR / "entity_relationships.csv",
 }
 
@@ -35,9 +39,7 @@ def load_csv(path):
         newline=""
     ) as file:
 
-        return list(
-            csv.DictReader(file)
-        )
+        return list(csv.DictReader(file))
 
 
 # ==================================================
@@ -71,7 +73,7 @@ def check_duplicates(records, field):
 
     for record in records:
 
-        value = record.get(field, "").strip()
+        value = record.get(field, "").strip().lower()
 
         if not value:
             continue
@@ -223,17 +225,13 @@ def analyze_relationships():
 
 def main():
 
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print("Starting Data Quality Check...")
+    print("======================================")
 
-    print(
-        "Starting Data Quality Check..."
-    )
-
-    print(
-        "======================================"
-    )
+    # ------------------------------------------------
+    # STARTUPS
+    # ------------------------------------------------
 
     analyze_file(
         "STARTUPS",
@@ -244,6 +242,10 @@ def main():
         ],
         "entityName"
     )
+
+    # ------------------------------------------------
+    # PRODUCTS
+    # ------------------------------------------------
 
     analyze_file(
         "PRODUCTS",
@@ -256,6 +258,10 @@ def main():
         "productName"
     )
 
+    # ------------------------------------------------
+    # RESEARCH PAPERS
+    # ------------------------------------------------
+
     analyze_file(
         "RESEARCH PAPERS",
         FILES["RESEARCH"],
@@ -266,6 +272,10 @@ def main():
         "paper_url"
     )
 
+    # ------------------------------------------------
+    # NEWS
+    # ------------------------------------------------
+
     analyze_file(
         "NEWS",
         FILES["NEWS"],
@@ -275,6 +285,10 @@ def main():
         ],
         "source_url"
     )
+
+    # ------------------------------------------------
+    # JOBS
+    # ------------------------------------------------
 
     analyze_file(
         "JOBS",
@@ -287,21 +301,39 @@ def main():
         "source_url"
     )
 
+    # ------------------------------------------------
+    # MODELS
+    # ------------------------------------------------
+
+    analyze_file(
+        "MODELS",
+        FILES["MODELS"],
+        [
+            "model_name",
+            "organization",
+            "source_url",
+            "official_website",
+            "logo_url",
+            "description"
+        ],
+        "source_url"
+    )
+
+    # ------------------------------------------------
+    # RELATIONSHIPS
+    # ------------------------------------------------
+
     analyze_relationships()
 
     print()
-    print(
-        "======================================"
-    )
+    print("======================================")
+    print("DATA QUALITY CHECK COMPLETED")
+    print("======================================")
 
-    print(
-        "DATA QUALITY CHECK COMPLETED"
-    )
 
-    print(
-        "======================================"
-    )
-
+# ==================================================
+# RUN
+# ==================================================
 
 if __name__ == "__main__":
     main()
